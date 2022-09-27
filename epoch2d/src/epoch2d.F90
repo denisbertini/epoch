@@ -182,6 +182,7 @@ PROGRAM pic
   IF (use_field_ionisation) CALL initialise_ionisation
   IF (use_collisional_ionisation) CALL setup_coll_ionise_tables
 
+  
   IF (timer_collect) CALL timer_start(c_timer_step)
 
   DO
