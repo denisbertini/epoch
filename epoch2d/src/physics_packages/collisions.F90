@@ -256,13 +256,14 @@ CONTAINS
                       nuclear_reactions%dens   = idens(ix,iy)
                       nuclear_reactions%log_lambda = log_lambda(ix,iy)
                       nuclear_reactions%user_factor = user_factor              
+
                       CALL nuclear_reactions%do_collide(n_product_list, he_product_list)
+
                       ! Put reactions products into respective lists
                       ! here particles will be added to (ix, iy) bin
                       ! and no compton scattering effects will be performed
                       ! at this timestep
-                      !CALL copy_partlist(n_product_list, n_product_list_tmp)
-                      !CALL copy_partlist(he_product_list, he_product_list_tmp)                      
+
                       CALL append_partlist( &
                            species_list(n_species_id)%secondary_list(ix,iy), &
                            n_product_list)
@@ -270,19 +271,11 @@ CONTAINS
                            species_list(he_species_id)%secondary_list(ix,iy), &
                            he_product_list)
 
-                      PRINT*,'collisions secondary product list ix: ', ix, ' iy:' , iy, ' neutrons#: ' &
+                      PRINT*,'n_collisions@time: ', time,' i_species: ', ispecies,' count: ' &
+                           , nuclear_reactions%p_list%count,' neutrons#: ' &
                            , species_list(n_species_id)%secondary_list(ix,iy)%count &
                            , ' helium#: ', species_list(he_species_id)%secondary_list(ix,iy)%count 
                                               
-                      ! Add to the main attached list on respective lists
-                      !CALL append_partlist( &
-                      !     species_list(n_species_id)%attached_list, &
-                      !     n_product_list_tmp)
-                      
-                      !CALL append_partlist( &
-                      !     species_list(he_species_id)%attached_list, &
-                      !     he_product_list_tmp)                      
-                      
                       ! Perform at end scattering on id:ispecies relevant list
                       ! Here i disable any further scattering treatment
                       ! to reproduce  Higginsons benchmarks
@@ -386,12 +379,6 @@ CONTAINS
        END DO ! jspecies
     END DO ! ispecies
 
-    !CALL update_particle_count
-    
-    !PRINT*, 'Collisions: Total nuclear products, Neutrons: '  &
-    !     , species_list(nuclear_reactions%n_species)%attached_list%count &
-    !     , ' Helium: ', species_list(nuclear_reactions%he_species)%attached_list%count    
-   
    
     DEALLOCATE(idens, jdens, jtemp, log_lambda)
     DEALLOCATE(meanx, meany, meanz, part_count)

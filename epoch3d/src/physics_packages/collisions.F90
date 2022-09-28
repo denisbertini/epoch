@@ -21,6 +21,8 @@ MODULE collisions
 
   USE calc_df
   USE collision_ionise
+  USE collision_nuclear
+  
 #ifdef PREFETCH
   USE prefetch
 #endif
@@ -28,6 +30,10 @@ MODULE collisions
   IMPLICIT NONE
 
   PRIVATE
+
+  TYPE (binary_rkine) :: nuclear_reactions
+  LOGICAL :: do_nuclear_reactions=.TRUE.
+  
   PUBLIC :: particle_collisions, setup_collisions
   PUBLIC :: deallocate_collisions
 
@@ -89,6 +95,7 @@ CONTAINS
     INTEGER(i8) :: ix, iy, iz
     TYPE(particle_list), POINTER :: p_list1
     TYPE(particle_list) :: list_e_ionising, list_i_ionised, list_e_ejected
+    TYPE(particle_list) :: he_product_list, n_product_list
     REAL(num), DIMENSION(:,:,:), ALLOCATABLE :: idens, jdens
     REAL(num), DIMENSION(:,:,:), ALLOCATABLE :: jtemp, log_lambda
     REAL(num), DIMENSION(:,:,:), ALLOCATABLE :: iekbar
@@ -228,11 +235,24 @@ CONTAINS
         DO iz = 1, nz
         DO iy = 1, ny
         DO ix = 1, nx
-          IF (ispecies == jspecies) THEN
-            CALL intra_coll_fn( &
-                species_list(ispecies)%secondary_list(ix,iy,iz), &
-                m1, q1, w1, idens(ix,iy,iz), &
-                log_lambda(ix,iy,iz), user_factor)
+           IF (ispecies == jspecies) THEN              
+              IF (do_nuclear_reactions) THEN
+                 ! Apply nuclear reaction in the like-particle case
+                 ! Test particle list
+                 nuclear_reactions%p_list = species_list(ispecies)%secondary_list(ix,iy,iz)
+                 nuclear_reactions%mass   = m1
+                 nuclear_reactions%charge = q1
+                 nuclear_reactions%weight = w1
+                 nuclear_reactions%dens   = idens(ix,iy,iz)
+                 nuclear_reactions%log_lambda = log_lambda(ix,iy,iz)
+                 nuclear_reactions%user_factor = user_factor              
+                 call nuclear_reactions%do_collide(he_product_list, n_product_list)
+              ELSE   
+                 CALL intra_coll_fn( &
+                      species_list(ispecies)%secondary_list(ix,iy,iz), &
+                      m1, q1, w1, idens(ix,iy,iz), &
+                      log_lambda(ix,iy,iz), user_factor)
+              ENDIF
           ELSE IF (run_coll_ionisation) THEN
               ! Apply collisional ionisation, moving ionising electrons and
               ! ionised ions from the secondary lists to new particle lists, and
@@ -631,14 +651,18 @@ CONTAINS
     s_fac = cell_fac * log_lambda / pi4_eps2_c4
     dens_23 = dens**two_thirds
     s_fac_prime = cell_fac * pi_fac / dens_23
-
+ 
+    
     DO k = 1, pcount
+      
 #ifdef PER_PARTICLE_CHARGE_MASS
       m1 = current%mass
       m2 = impact%mass
       q1 = current%charge
       q2 = impact%charge
+
 #endif
+            
       p1 = current%part_p / c
       p2 = impact%part_p / c
 
@@ -665,25 +689,28 @@ CONTAINS
       v1 = p1 / gm1
       v2 = p2 / gm2
 
-      ! Velocity of centre-of-momentum (COM) reference frame
+      ! Velocity of centre-of-mass (CM) expressed in the reference frame (Lab)
       vc = (p1 + p2) / gm
       vc_sq = DOT_PRODUCT(vc, vc)
 
       gamma_rel_inv = SQRT(1.0_num - vc_sq)
       gc = 1.0_num / gamma_rel_inv
 
+      ! Lorentz transformed momentum of test particle
       gc_m1_vc = (gc - 1.0_num) / vc_sq
-
       p3 = p1 + (gc_m1_vc * DOT_PRODUCT(vc, v1) - gc) * gm1 * vc
 
+      ! Lorentz tranformed gamma_1* gamma_2*
       v_sq = DOT_PRODUCT(vc, v1)
       gm3 = (1.0_num - v_sq) * gc * gm1
       v_sq = DOT_PRODUCT(vc, v2)
       gm4 = (1.0_num - v_sq) * gc * gm2
 
+      ! CM Momentum norm  p* = p1* = p2*
       p_mag2 = DOT_PRODUCT(p3, p3)
       p_mag = SQRT(p_mag2)
 
+      
       fac = (q1 * q2)**2 * s_fac / (gm1 * gm2)
       s12 = fac * gc * p_mag * c / gm * (gm3 * gm4 / p_mag2 + 1.0_num)**2
 
@@ -745,6 +772,7 @@ CONTAINS
       p5 = (p3 + (gc_m1_vc * DOT_PRODUCT(vc, p3) + gm3 * gc) * vc) * c
       p6 = (p4 + (gc_m1_vc * DOT_PRODUCT(vc, p4) + gm4 * gc) * vc) * c
 
+      
       ! Update particle properties
       current%part_p = p5
       impact%part_p = p6

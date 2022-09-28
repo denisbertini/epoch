@@ -304,7 +304,7 @@ FC_INFO := $(shell ${FC} --version 2>/dev/null \
     || ${FC} -V 2>/dev/null | grep '[a-zA-Z]' | head -n 1)
 
 SRCFILES = balance.F90 boundary.F90 bremsstrahlung.F90 calc_df.F90 \
-	collisions.F90 collision_ionise.F90 constants.F90 current_smooth.F90 \
+	collisions.F90 collision_ionise.F90 collision_nuclear.F90 constants.F90 current_smooth.F90 \
 	custom_deck.f90 custom_laser.f90 custom_parser.f90 deck.F90 \
 	deck_boundaries_block.f90 deck_bremsstrahlung_block.F90 \
 	deck_collision_block.F90 deck_constant_block.f90 deck_control_block.F90 \
@@ -449,8 +449,9 @@ boundary.o: boundary.F90 injectors.o laser.o mpi_subtype_control.o \
   particle_id_hash.o particle_temperature.o partlist.o utilities.o
 bremsstrahlung.o: bremsstrahlung.F90 calc_df.o particles.o partlist.o setup.o
 calc_df.o: calc_df.F90 boundary.o
-collisions.o: collisions.F90 calc_df.o collision_ionise.o prefetch.o
+collisions.o: collisions.F90 calc_df.o collision_ionise.o collision_nuclear.o prefetch.o
 collision_ionise.o: collision_ionise.F90 calc_df.o prefetch.o
+collision_nuclear.o: collision_nuclear.F90 calc_df.o prefetch.o
 constants.o: constants.F90 $(SDFMOD)
 current_smooth.o: current_smooth.F90 boundary.o constants.o shape_functions.o
 custom_deck.o: custom_deck.f90 constants.o
@@ -497,7 +498,7 @@ diagnostics.o: diagnostics.F90 calc_df.o constants.o deck.o deck_io_block.o \
   strings.o timer.o version_data.o window.o $(SDFMOD) $(ENCODED_SOURCE)
 dist_fn.o: dist_fn.F90 mpi_subtype_control.o particles.o $(SDFMOD)
 epoch3d.o: epoch3d.F90 balance.o bremsstrahlung.o calc_df.o collisions.o \
-	collision_ionise.o current_smooth.o deck.o diagnostics.o fields.o finish.o \
+	collision_ionise.o collision_nuclear.o current_smooth.o deck.o diagnostics.o fields.o finish.o \
 	helper.o ic_module.o injectors.o ionise.o mpi_routines.o \
 	particle_migration.o particles.o photons.o setup.o split_particle.o \
 	welcome.o window.o
