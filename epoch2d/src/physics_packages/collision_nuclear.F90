@@ -6,6 +6,9 @@ module collision_nuclear
 
     ! Collision type modelled
     LOGICAL, PARAMETER   :: do_dd_fusion = .true.
+    LOGICAL, PARAMETER   :: do_dt_fusion = .true.
+    LOGICAL, PARAMETER   :: do_dhe_fusion = .true.
+    LOGICAL, PARAMETER   :: do_het_fusion = .true.    
     
     REAL(num), PARAMETER :: eps = EPSILON(1.0_num)
     REAL(num), PARAMETER :: one_m_2eps = 1.0_num - 2.0_num * eps
@@ -20,20 +23,41 @@ module collision_nuclear
     REAL(num), PARAMETER :: pi_fac = &
          (4.0_num * pi / 3.0_num)**(1.0_num / 3.0_num)
     REAL(num), PARAMETER :: j_to_kev = 6.241509e+15 
+
+    ! Numbering scheme for the fusion reaction
+    ! 1) DD -> T + p
+    ! 2) DD -> He3 + n
+    ! 3) DT-> He4 + n
+    ! 4) D He3 ->He4 + p  
+    ! 5) He3 T -> He4 + D
+    ! 6) He3 T -> He5 + p 
+
+    ! Released energy in MeV
+    REAL(num), PARAMETER :: Q_R(6) = [4.08, 3.27, 17.6, 18.3, 14.3, 28.36]
+    ! Branching ratios
+    REAL(num), PARAMETER :: BR(6) = [.5, .5,  1.,  1. , .43, .06]
+    ! Reaction ids
+    INTEGER              :: r_id
     
     public binary_rkine
     type binary_rkine
-       type(particle_list) :: p_list  
-       real(num)           :: mass, charge, weight
+       type(particle_list) :: p_list(2)
+       integer             :: ispecies, jspecies
+       real(num)           :: mass(2), charge(2), weight(2)
        real(num)           :: user_factor
-       real(num)           :: dens
+       real(num)           :: dens(2)
        real(num)           :: log_lambda
        integer             :: n_species
        integer             :: he_species
+       
      contains
        procedure         :: initialize
        procedure         :: do_collide
+       procedure         :: do_like_collide
+       procedure         :: do_unlike_collide       
        procedure         :: model_dd_fusion
+       procedure         :: model_like_fusion
+       procedure         :: model_unlike_fusion              
        procedure         :: create_fusion_products
        procedure         :: get_species_id       
        procedure, nopass :: generate_produced_particle
@@ -47,12 +71,12 @@ module collision_nuclear
 
       DO ispecies = 1, n_species
          IF (species_list(ispecies)%name == TRIM('neutron')) THEN
-                this%n_species = ispecies
-             ELSE IF  (species_list(ispecies)%name == TRIM('helium')) THEN
-                this%he_species = ispecies
-          END IF  
+            this%n_species = ispecies
+         ELSE IF  (species_list(ispecies)%name == TRIM('helium')) THEN
+            this%he_species = ispecies
+            
+         END IF
        END DO
-       !PRINT*,'nuclear_reaction species id, n: ', this%n_species, ' he: ', this%he_species 
       
      END SUBROUTINE initialize
 
@@ -70,19 +94,455 @@ module collision_nuclear
 
      END SUBROUTINE get_species_id
 
+     SUBROUTINE do_like_collide(this, reaction_id, prod_lists)
+       CLASS(binary_rkine), INTENT(INOUT)    :: this
+       TYPE(particle_list), INTENT(INOUT), DIMENSION(6,2)    :: prod_lists      
+       INTEGER            , INTENT(OUT)       :: reaction_id
+       
+       ! Only DD is considered for like particle decay   
+       IF ( species_list(this%jspecies)%name == TRIM('deuteron') .AND. &
+            species_list(this%ispecies)%name == TRIM('deuteron') )  THEN
+          !print*,'do_like_collide: dd_fusion with p1: ', species_list(this%ispecies)%name, 'p2: ', species_list(this%jspecies)%name          
+          CALL this%model_like_fusion(reaction_id, prod_lists)
+       END IF
+       
+     END SUBROUTINE do_like_collide
+     
+     SUBROUTINE do_unlike_collide(this, reaction_id, prod_lists)
+       CLASS(binary_rkine), INTENT(INOUT)    :: this
+       TYPE(particle_list), INTENT(INOUT), DIMENSION(6,2)  :: prod_lists      
+       INTEGER            , INTENT(OUT)       :: reaction_id
+       
+       ! select only relevant reactions
+       
+       r_id = 0
+       
+       IF( &
+            ( species_list(this%ispecies)%name == TRIM('deuteron') .AND.  &
+            species_list(this%jspecies)%name == TRIM('tritium') ) .OR. &
+            ( species_list(this%ispecies)%name == TRIM('triium') .AND.  &
+            species_list(this%jspecies)%name == TRIM('deuteron') )      &
+            ) THEN
+          
+          r_id = 3
+          
+       ELSE IF( &
+            ( species_list(this%ispecies)%name == TRIM('deuteron') .AND. &
+            species_list(this%jspecies)%name == TRIM('helium') ) .OR. &
+            ( species_list(this%ispecies)%name == TRIM('helium') .AND. &
+            species_list(this%jspecies)%name == TRIM('deuteron') )     &
+            ) THEN
+          
+          r_id = 4
+          
+       ELSE IF( &   
+            ( species_list(this%ispecies)%name == TRIM('helium') .AND.    &
+            species_list(this%jspecies)%name == TRIM('tritium') ) .OR. &
+            ( species_list(this%ispecies)%name == TRIM('tritium') .AND. &
+            species_list(this%jspecies)%name == TRIM('helium') )        &
+            ) THEN
+          
+          r_id = 5
+          
+       ELSE
+          RETURN           
+       ENDIF
+       
+       IF ( r_id == 3 .OR. r_id == 4 .OR. r_id == 5) THEN
+          !print*,'do_unlike_collide with reaction_id ', r_id &
+          !     , ' reactant1: ',  species_list(this%ispecies)%name &
+          !     , ' reactant2: ',  species_list(this%jspecies)%name
+          
+          CALL this%model_unlike_fusion(r_id, prod_lists)
+          reaction_id = r_id                    
+       END IF
+       
+     END SUBROUTINE do_unlike_collide
+
+    
+    SUBROUTINE model_like_fusion(this, reaction_id, prod_lists)
+      CLASS(binary_rkine), INTENT(INOUT)    :: this
+      TYPE(particle),      POINTER          :: current, impact
+      TYPE(particle_list), INTENT(INOUT), DIMENSION(6,2)  :: prod_lists      
+      TYPE(particle),      POINTER          :: n1_part, n2_part, he1_part, he2_part
+      INTEGER,             INTENT(OUT)      ::reaction_id
+      REAL(num) :: factor
+      INTEGER(i8) :: icount, k, pcount, npairs, n2max, n_ratio
+      REAL(num) :: ran1, ran2, s12, cosp, sinp, s_fac, v_rel
+      REAL(num) :: sinp_cos, sinp_sin, s_prime, s_fac_prime
+      REAL(num) :: a, a_inv, p_perp, p_tot, v_sq, gamma_rel_inv
+      REAL(num) :: p_perp2, p_perp_inv, cell_fac
+      REAL(num), DIMENSION(3) :: p1, p2, p3, p4, vc, v1, v2, p5, p6,v12
+      REAL(num), DIMENSION(3) :: p1_norm, p2_norm
+      REAL(num), DIMENSION(3,3) :: mat
+      REAL(num) :: p_mag, p_mag2, fac, gc, vc_sq
+      REAL(num) :: gm1, gm2, gm3, gm4, gm, gc_m1_vc
+      REAL(num) :: m1, m2, q1, q2, m3, m4, dens_23
+      REAL(num) :: minW, maxW, wp, cell_v, prob_fusion    
+      REAL(num) :: v12_norm, ek_r , cs
+      LOGICAL   :: e_ok
+      INTEGER   :: i, j
+      
+      ! Determine which reaction to consider
+      ran1 = random()      
+      IF ( ran1 < BR(1) ) THEN
+         reaction_id = 1
+      ELSE 
+         reaction_id = 2 
+      END IF
+                  
+      ! Case of pairing with one specie (so called intra collisions) 
+      ! Number of m_particles in the list
+      icount = this%p_list(1)%count
+      IF (icount <= 1) RETURN      
+      ! Number of collisions
+      pcount = icount / 2 + MOD(icount, 2_i8)
+      !PRINT *, "model_dd_fusion -> : processing ncollisions: ", pcount, " non-even excess: ", MOD(icount, 2_i8)
+      
+      ! Use per-species particle properties 
+      m1 = this%mass(1) 
+      m2 = this%mass(2) 
+      q1 = this%charge(1)
+      q2 = this%charge(2)
+      ! NRatio factor ( Higginson eq 17 for like-particles )
+      ! NRatio_(like_particles) = N_pairs/Sampled_Pairs = (N*(N-1)/2)/(N/2) = N-1 
+      n_ratio = icount - 1
+      ! Cell volume (2D) units m^2
+      cell_v = dx*dy
+      
+      !PRINT *, "model_dd_fusion ->  q1:", q1, " m1: ", m1
+      !PRINT *, "model_dd_fusion -> NRatio: ", n_ratio, "cell_v:", cell_v
+      
+      ! Join tail to the head of the list to make it circular
+      this%p_list(1)%tail%next => this%p_list(1)%head
+      
+      ! Initialise current and impact particle
+      ! consecutively in the part. list
+      current => this%p_list(1)%head
+      impact => current%next
+      
+      !PRINT *,' begin pairing count: ', pcount
+
+      ! Reinit particle lists 
+      DO i = 1 , 6
+         DO j = 1, 2
+            CALL destroy_partlist(prod_lists(i,j))
+         END DO
+      END DO
+      
+      ! Loop over pairs   
+      DO k = 1, pcount      
+
+         ! Get Min and Max Weight
+         minW= min(current%weight,impact%weight)
+         maxW= max(current%weight,impact%weight)
+         ! Momentums for paired particles
+         p1 = current%part_p 
+         p2 = impact%part_p 
+         p1_norm = p1 / m0
+         p2_norm = p2 / m0
+         ! Remove non-moving particles 
+         IF (DOT_PRODUCT(p1_norm, p1_norm) < eps &
+              .AND. DOT_PRODUCT(p2_norm, p2_norm) < eps) CYCLE         
+         ! Remove particles with the same momentum
+         vc = (p1_norm - p2_norm)
+         IF (DOT_PRODUCT(vc, vc) < eps) CYCLE         
+         p1_norm = p1 / m1
+         p2_norm = p2 / m2
+         v12 = p1_norm - p2_norm
+         v12_norm = SQRT(DOT_PRODUCT(v12, v12))  
+         
+         ! Ek_r = 1/2 * m12 * v12**2
+         ek_r = 0.5_num * m1 * 0.5_num * (v12_norm**2)
+         ek_r = ek_r * j_to_kev
+         
+         ! calculate cross section (Bosh Hale parametrisation)
+         cs = xsec_bh( reaction_id,  ek_r )
+         
+         ! Probability for fusion
+         prob_fusion = (n_ratio * maxW * v12_norm * cs * dt) / cell_v
+         prob_fusion = prob_fusion * this%user_factor 
+         !PRINT*,"model_dd_fusion  prob_fusion: ", prob_fusion, "ek_r: ", ek_r,  "xsec: ",  cs, ' dt_step: ', dt 
+         ! Adjusting probability in seldom cases where P_fusion > 1 
+         DO WHILE (prob_fusion>.99_num)       
+            this%user_factor = this%user_factor/10.0_num
+            prob_fusion = (this%user_factor * (n_ratio * maxW * v12_norm * cs * dt)) / cell_v
+            !PRINT*," Adjusting prob_fusion: ", prob_fusion   
+         END DO
+         
+         ! Check if fusion event occurs
+         ran1 = random()
+         IF ( ran1 < prob_fusion ) THEN
+           ! PRINT*,"model_like_fusion  event  prob_fusion: ", prob_fusion, "ek_r: ", ek_r,  "xsec: ",  cs, ' dt_step: ', dt 
+            !PRINT*,' Fusion event has occured ran1: ', ran1, ' Pfusion: ', prob_fusion, ' reaction_id: ', reaction_id
+            ! Create fusion products
+            CALL this%create_fusion_products(reaction_id, p1, m1, p2, m2, p3, m3, p4, m4, e_ok)
+            IF (e_ok) THEN
+               !PRINT*, ' created Fusion products m1 ', m1, ' pxyz:', p1(1), p1(2), p1(3)
+               !PRINT*, ' created Fusion products m2 ', m2, ' pxyz:', p2(1), p2(2), p2(3)              
+               !PRINT*, ' created Fusion products m3 ', m3, ' pxyz:', p3(1), p3(2), p3(3)
+               !PRINT*, ' created Fusion products m4 ', m4, ' pxyz:', p4(1), p4(2), p4(3)
+            END IF
+            
+            ! Calculate new weight for fusion products 
+            wp = minW / this%user_factor 
+            ! Reduce weight of both reactant   
+            current%weight = current%weight - wp
+            impact%weight  = impact%weight  - wp
+            
+            ! Creates product particles
+            ! Here we take by defaut the position of the test particle (current)
+            ! In principle it would be better to correct the weigth by a factor
+            ! ( q1,2/q1+q2) and make the particle in both particle p1, p2 positions
+            ! But for that we need to be able to assign the  total charge to the
+            ! created charged products ( in this case He)
+            CALL generate_produced_particle(current%part_pos, p3, wp, n1_part)
+            CALL generate_produced_particle(current%part_pos, p4, wp, he1_part)
+            
+            ! adding particles to corresponding lists 
+            CALL add_particle_to_partlist(prod_lists(reaction_id,1), n1_part)
+            CALL add_particle_to_partlist(prod_lists(reaction_id,2), he1_part)
+            
+            NULLIFY(n1_part)
+            NULLIFY(he1_part)
+            
+           ! print*, ' pairing iter: ', k,  ' reaction_id: ', reaction_id, ' prod_list1: ' &
+           !      , prod_lists(1,1)%count, ' : ' , prod_lists(1,2)%count &
+           !      ,' prod_list2: ', prod_lists(2,1)%count, ' : ', prod_lists(2,2)%count 
+            
+         END IF ! (ran<p_fusion)
+
+         ! Get the next part. pair 
+         current => impact%next
+         impact => current%next
+#ifdef PREFETCH
+         CALL prefetch_particle(current)
+         CALL prefetch_particle(impact)
+#endif
+      END DO ! do k, npairs  
+      
+      ! PRINT*,' end pairing '
+      ! restore the tail of the list
+      NULLIFY(this%p_list(1)%tail%next)      
+      
+    END SUBROUTINE model_like_fusion
+    
+
+    SUBROUTINE model_unlike_fusion(this, reaction_id, prod_lists)  
+      CLASS(binary_rkine), INTENT(INOUT)    :: this
+      TYPE(particle),      POINTER          :: current, impact
+      TYPE(particle_list), INTENT(INOUT), DIMENSION(6,2)  :: prod_lists      
+      TYPE(particle),      POINTER          :: n1_part, n2_part, he1_part, he2_part
+      INTEGER,             INTENT(INOUT)      ::reaction_id
+      REAL(num) :: factor
+      INTEGER(i8) :: icount, jcount, k, pcount, npairs, n2max, n_ratio
+      REAL(num) :: ran1, ran2, s12, cosp, sinp, s_fac, v_rel
+      REAL(num) :: sinp_cos, sinp_sin, s_prime, s_fac_prime
+      REAL(num) :: a, a_inv, p_perp, p_tot, v_sq, gamma_rel_inv
+      REAL(num) :: p_perp2, p_perp_inv, cell_fac
+      REAL(num), DIMENSION(3) :: p1, p2, p3, p4, vc, v1, v2, p5, p6,v12
+      REAL(num), DIMENSION(3) :: p1_norm, p2_norm
+      REAL(num), DIMENSION(3,3) :: mat
+      REAL(num) :: p_mag, p_mag2, fac, gc, vc_sq
+      REAL(num) :: gm1, gm2, gm3, gm4, gm, gc_m1_vc
+      REAL(num) :: m1, m2, q1, q2, w1, w2, m3, m4, dens_23
+      REAL(num) :: minW, maxW, wp, cell_v, prob_fusion    
+      REAL(num) :: v12_norm, ek_r , ek_lab, cs
+      LOGICAL   :: e_ok
+      INTEGER   :: i, j
+
+      ! Reinit particle lists 
+      DO i = 1 , 6
+         DO j = 1, 2
+            CALL destroy_partlist(prod_lists(i,j))
+         END DO
+      END DO
+     
+      ! Take Branching ration into account
+      ! for reaction 5 
+      IF ( reaction_id == 5 ) THEN
+         ! Determine which reaction to consider
+         ran1 = random()      
+         IF ( ran1 < BR(5) ) THEN
+            reaction_id = 5
+         ELSE IF ( ran1 < BR(6) ) THEN
+            reaction_id = 6
+         ELSE
+            RETURN
+         END IF
+      END IF
+      
+      factor = 0.0_num
+      
+      ! Inter-species collisions
+      icount = this%p_list(1)%count
+      jcount = this%p_list(2)%count
+      pcount = MAX(icount, jcount)
+
+      ! NRatio factor ( Higginson eq 17 for like-particles )
+      ! NRatio_(unlike_particles) = N_pairs/Sampled_Pairs = Npairs 
+      n_ratio = pcount
+      
+      ! Cell volume (2D) units m^2
+      cell_v = dx*dy      
+
+      IF (icount > 0 .AND. jcount > 0) THEN
+         ! temporarily join tail to the head of the lists to make them circular
+         this%p_list(1)%tail%next => this%p_list(1)%head
+         this%p_list(2)%tail%next => this%p_list(2)%head
+         
+#ifdef PER_SPECIES_WEIGHT
+         factor = pcount * MIN(this%weight(1), this%weight(2))
+#else
+         current => this%p_list(1)%head
+         impact => this%p_list(2)%head
+         
+         DO k = 1, pcount
+            factor = factor + MIN(current%weight, impact%weight)
+            current => current%next
+            impact => impact%next
+#ifdef PREFETCH
+            CALL prefetch_particle(current)
+            CALL prefetch_particle(impact)
+#endif
+         END DO
+#endif
+
+         factor = this%user_factor / factor
+         
+         m1 = this%mass(1)
+         m2 = this%mass(2)
+         q1 = this%charge(1)
+         q2 = this%charge(2)
+         w1 = this%weight(1)
+         w2 = this%weight(2)
+         
+         current => this%p_list(1)%head
+         impact => this%p_list(2)%head
+         
+         ! Loop over pairs   
+         DO k = 1, pcount    
+            ! Get Min and Max Weight
+            minW= min(current%weight,impact%weight)
+            maxW= max(current%weight,impact%weight)
+            ! Momentums for paired particles
+            p1 = current%part_p 
+            p2 = impact%part_p 
+            p1_norm = p1 / m0
+            p2_norm = p2 / m0
+            ! Remove non-moving particles 
+            IF (DOT_PRODUCT(p1_norm, p1_norm) < eps &
+                 .AND. DOT_PRODUCT(p2_norm, p2_norm) < eps) CYCLE         
+            ! Remove particles with the same momentum
+            vc = (p1_norm - p2_norm)
+            IF (DOT_PRODUCT(vc, vc) < eps) CYCLE         
+            p1_norm = p1 / m1
+            p2_norm = p2 / m2
+            v12 = p1_norm - p2_norm
+            v12_norm = SQRT(DOT_PRODUCT(v12, v12))  
+            
+            ! Ek_r = 1/2 * m12 * v12**2
+            ek_r = 0.5_num * m1 * 0.5_num * (v12_norm**2)
+            ek_r = ek_r * j_to_kev
+            
+            IF (reaction_id < 4 ) THEN  
+               ! calculate cross section (Bosh Hale parametrisation)
+               cs = xsec_bh( reaction_id,  ek_r )
+               !PRINT*,'Model_unlike_fusion Xsec BH:', cs, 'reaction id: ', reaction_id
+            ELSE
+               ! calculate from the plasma formulary parametrisation
+               ek_lab = ((m1 + m2) / m2) * ek_r 
+               cs = xsec_fo( reaction_id, ek_lab )
+               PRINT*,'Model_unlike_fusion Xsec FO:', cs, 'reaction id: ', reaction_id               
+            END IF
+            
+            ! Probability for fusion
+            prob_fusion = (n_ratio * maxW * v12_norm * cs * dt) / cell_v
+            prob_fusion = prob_fusion * this%user_factor 
+            !PRINT*,"model_unlike_fusion  prob_fusion: ", prob_fusion, "ek_r: ", ek_r,  "xsec: ",  cs, ' dt_step: ', dt 
+            ! Adjusting probability in seldom cases where P_fusion > 1 
+            DO WHILE (prob_fusion>.99_num)       
+               this%user_factor = this%user_factor/10.0_num
+               prob_fusion = (this%user_factor * (n_ratio * maxW * v12_norm * cs * dt)) / cell_v
+               !PRINT*," Adjusting prob_fusion: ", prob_fusion   
+            END DO
+            
+            ! Check if fusion event occurs
+            ran1 = random()
+            IF ( ran1 < prob_fusion ) THEN
+               !PRINT*,'Model_unlike fusion: event has occured ran1: ', ran1, ' Pfusion: ', prob_fusion &
+               !     ,' reaction_id: ', reaction_id
+               !PRINT*,"model_unlike_fusion  event  prob_fusion: ", prob_fusion, "ek_r: ", ek_r,  "xsec: ",  cs, ' dt_step: ', dt 
+               ! Create fusion products
+               CALL this%create_fusion_products(reaction_id, p1, m1, p2, m2, p3, m3, p4, m4, e_ok)
+               IF (e_ok) THEN
+                  !PRINT*, ' created Fusion products m1 ', m1, ' pxyz:', p1(1), p1(2), p1(3)
+                  !PRINT*, ' created Fusion products m2 ', m2, ' pxyz:', p2(1), p2(2), p2(3)              
+                  !PRINT*, ' created Fusion products m3 ', m3, ' pxyz:', p3(1), p3(2), p3(3)
+                  !PRINT*, ' created Fusion products m4 ', m4, ' pxyz:', p4(1), p4(2), p4(3)
+               END IF
+               
+               ! Calculate new weight for fusion products 
+               wp = minW / this%user_factor 
+               ! Reduce weight of both reactant   
+               current%weight = current%weight - wp
+               impact%weight  = impact%weight  - wp
+               
+               ! Creates product particles
+               ! Here we take by defaut the position of the test particle (current)
+               ! In principle it would be better to correct the weigth by a factor
+               ! ( q1,2/q1+q2) and make the particle in both particle p1, p2 positions
+               ! But for that we need to be able to assign the  total charge to the
+               ! created charged products ( in this case He)
+               CALL generate_produced_particle(current%part_pos, p3, wp, n1_part)
+               CALL generate_produced_particle(current%part_pos, p4, wp, he1_part)
+               
+               ! adding particles to corresponding lists 
+               CALL add_particle_to_partlist(prod_lists(reaction_id,1), n1_part)
+               CALL add_particle_to_partlist(prod_lists(reaction_id,2), he1_part)
+               
+               NULLIFY(n1_part)
+               NULLIFY(he1_part)
+               
+               !print*, ' pairing iter: ', k,  ' reaction_id: ', reaction_id, ' prod_list: ' &
+               !     , prod_lists(reaction_id,1)%count, ' : ' , prod_lists(reaction_id,2)%count 
+               
+            END IF ! (ran<p_fusion)
+            
+            ! Get the next part. pair 
+            current => impact%next
+            impact => current%next
+#ifdef PREFETCH
+            CALL prefetch_particle(current)
+            CALL prefetch_particle(impact)
+#endif
+         END DO ! do k, npairs
+         
+         ! restore the tail of the lists
+         NULLIFY(this%p_list(1)%tail%next)
+         NULLIFY(this%p_list(2)%tail%next)      
+         
+      END IF !(icount >0 && jcount>0)
+    END SUBROUTINE model_unlike_fusion
+    
+   
+   !  
+   ! First code version   
+   ! 
+     
     SUBROUTINE do_collide(this, n_list, he_list)
       CLASS(binary_rkine), INTENT(INOUT)    :: this
       TYPE(particle_list), INTENT(INOUT)    :: n_list, he_list      
 
       IF ( do_dd_fusion ) THEN
-         PRINT *, "n_reactions -> do_dd_fusion: species mass: ", this%mass
+         PRINT *, "n_reactions -> do_dd_fusion: species mass: ", this%mass(1)
          call this%model_dd_fusion(n_list, he_list)
       ELSE
          PRINT *, "n_reactions -> no reactions selected ... "
       ENDIF
     END SUBROUTINE do_collide
      
-
+    
     SUBROUTINE model_dd_fusion(this, n_list, he_list)
       CLASS(binary_rkine), INTENT(INOUT)    :: this
       TYPE(particle),      POINTER          :: current, impact
@@ -106,17 +566,17 @@ module collision_nuclear
       
       ! Case of pairing with one specie (so called intra collisions) 
       ! Number of m_particles in the list
-      icount = this%p_list%count
+      icount = this%p_list(1)%count
       IF (icount <= 1) RETURN      
       ! Number of collisions
       pcount = icount / 2 + MOD(icount, 2_i8)
       !PRINT *, "model_dd_fusion -> : processing ncollisions: ", pcount, " non-even excess: ", MOD(icount, 2_i8)
       
       ! Use per-species particle properties 
-      m1 = this%mass 
-      m2 = this%mass 
-      q1 = this%charge
-      q2 = this%charge
+      m1 = this%mass(1) 
+      m2 = this%mass(2) 
+      q1 = this%charge(1)
+      q2 = this%charge(2)
       ! NRatio factor ( Higginson eq 17 for like-particles )
       ! NRatio_(like_particles) = N_pairs/Sampled_Pairs = (N*(N-1)/2)/(N/2) = N-1 
       n_ratio = icount - 1
@@ -127,11 +587,11 @@ module collision_nuclear
       !PRINT *, "model_dd_fusion -> NRatio: ", n_ratio, "cell_v:", cell_v
 
       ! Join tail to the head of the list to make it circular
-      this%p_list%tail%next => this%p_list%head
+      this%p_list(1)%tail%next => this%p_list(1)%head
 
       ! Initialise current and impact particle
       ! consecutively in the part. list
-      current => this%p_list%head
+      current => this%p_list(1)%head
       impact => current%next
       
       ! Loop over pairs   
@@ -157,7 +617,9 @@ module collision_nuclear
 
          ! Ek_r = 1/2 * m12 * v12**2
          ek_r = 0.5_num * m1 * 0.5_num * (v12_norm**2)
-         ek_r = ek_r * j_to_kev         
+         ek_r = ek_r * j_to_kev
+         
+         ! calculate cross section
          cs = xsec( ek_r )
 
          ! Probability for fusion
@@ -176,7 +638,7 @@ module collision_nuclear
          IF ( ran1 < prob_fusion ) THEN
             !PRINT*,' Fusion event has occured ran1: ', ran1, ' Pfusion: ', prob_fusion
             ! Create fusion products
-            CALL this%create_fusion_products(p1, m1, p2, m2, p3, m3, p4, m4, e_ok)
+            CALL this%create_fusion_products(2, p1, m1, p2, m2, p3, m3, p4, m4, e_ok)
             IF (e_ok) THEN
                !PRINT*, ' created Fusion products m1 ', m1, ' pxyz:', p1(1), p1(2), p1(3)
                !PRINT*, ' created Fusion products m2 ', m2, ' pxyz:', p2(1), p2(2), p2(3)              
@@ -222,16 +684,18 @@ module collision_nuclear
          CALL prefetch_particle(impact)
 #endif
       END DO ! do k, npairs  
-      
+
+
 
       ! restore the tail of the list
-      NULLIFY(this%p_list%tail%next)      
+      NULLIFY(this%p_list(1)%tail%next)      
       
     END SUBROUTINE model_dd_fusion
 
 
-    SUBROUTINE create_fusion_products(this, p1, m1, p2, m2, p3, mass3, p4, mass4, conserv)
+    SUBROUTINE create_fusion_products(this, reaction_id, p1, m1, p2, m2, p3, mass3, p4, mass4, conserv)
       CLASS(binary_rkine), INTENT(INOUT)    :: this
+      INTEGER,                INTENT(IN)    :: reaction_id
       REAL(num), DIMENSION(3), INTENT(IN)   :: p1, p2
       REAL(num)              , INTENT(IN)   :: m1, m2
       REAL(num), DIMENSION(3), INTENT(OUT)  :: p3, p4
@@ -245,16 +709,42 @@ module collision_nuclear
       REAL(NUM)                             :: mr, V3mag, vab
       REAL(NUM)                             :: cosA, cosP, sinA, sinP, phi      
       REAL(NUM)                             :: gm1, gm2, gm3, gm4
-      LOGICAL  ,                INTENT(OUT) :: conserv            
-      REAL(NUM), PARAMETER                  :: Q  = 3.269e3 !(keV)
-      REAL(NUM), PARAMETER                  :: m3 = 1838.7 * m0
-      REAL(NUM), PARAMETER                  :: m4 = 5497.9 * m0
-
+      LOGICAL  ,                INTENT(OUT) :: conserv
+      REAL(NUM)                             :: Q, m3 , m4 
+      INTEGER                               :: errcode, ierr
+!      REAL(NUM), PARAMETER                  :: Q  = 3.269e3 !(keV)
+!      REAL(NUM), PARAMETER                  :: m3 = 1838.7 * m0
+!      REAL(NUM), PARAMETER                  :: m4 = 5497.9 * m0
+ 
+            
 
       ! Fusion Reaction Kinematics
       ! Following algorithm described in 
       ! D. P. Higginson, A. Link, A. Schmidt, J. Comput. Phys. 388, 439 (2019)
 
+      Q = Q_R( reaction_id )
+      IF ( reaction_id == 1 ) THEN
+         m3 = 5497.94 * m0
+         m4 = 1836.2  * m0
+      ELSE IF ( reaction_id ==  2 ) THEN
+         m3 = 5497.9  * m0
+         m4 = 1838.7  * m0
+      ELSE IF ( reaction_id ==  3 ) THEN
+         m3 = 7296.429 * m0
+         m4 = 1838.7  * m0
+      ELSE IF ( reaction_id == 4 ) THEN
+         m3 = 7296.429 * m0
+         m4 = 1836.2   * m0
+      ELSE IF ( reaction_id ==  5 ) THEN
+         m3 = 7296.429 * m0
+         m4 = 1836.2 * 2 * m0
+      ELSE IF ( reaction_id ==  6 ) THEN
+         m3 = 9133.062 * m0
+         m4 = 1836.2  * m0
+      ELSE
+         PRINT*,'Error no reaction selected  abort ! '
+         CALL MPI_Abort(MPI_COMM_WORLD, errcode, ierr)
+      END IF   
       
       ! Pre-collision velocities
       va = p1 / m1
@@ -349,6 +839,127 @@ module collision_nuclear
       
     END SUBROUTINE create_fusion_products
 
+
+    FUNCTION xsec_bh(reaction_id, e)
+      ! Bosh-Hale fusion cross section
+      IMPLICIT NONE
+      REAL(num) :: xsec_bh
+      REAL(num), INTENT(IN) :: e ! keV
+      INTEGER,   INTENT(IN) :: reaction_id ! selected reaction
+      REAL(num)             :: BG
+      REAL(num)             :: A1, A2, A3, A4, A5
+      REAL(num)             :: B1, B2, B3, B4
+      REAL(num)             :: se, se_top, se_down
+
+      ! Bosh-Hale parametrisation
+      !         sigma(E) = S(E)/(E*exp(BG/sqrt(E)))
+
+      IF (reaction_id == 1) THEN
+         BG = 31.3970 ! sqrt(keV)
+         A1 =  5.5576e4
+         A2 =  2.1054e2
+         A3 = -3.2638e-2
+         A4 =  1.4987e-6
+         A5 =  1.8181e-10
+         B1 =  0.0
+         B2 =  0.0
+         B3 =  0.0
+         B4 =  0.0
+      ELSE IF (reaction_id == 2) THEN
+         BG = 31.3970 ! sqrt(keV)
+         A1 =  5.3701e4
+         A2 =  3.3027e2
+         A3 = -1.2706e-1
+         A4 =  2.9327e-5
+         A5 = -2.5151e-9
+         B1 =  0.0
+         B2 =  0.0
+         B3 =  0.0
+         B4 =  0.0
+      ELSE IF (reaction_id == 3) THEN
+         BG =  34.3827 ! sqrt(keV)        
+         A1 =  6.927e4
+         A2 =  7.454e8
+         A3 =  2.050e6
+         A4 =  5.2002e4
+         A5 =  0.0
+         B1 =  6.38e1
+         B2 = -9.95e-1
+         B3 =  6.981e-5
+         B4 =  1.728e-4    
+         
+      ELSE
+         PRINT*,' Warning xsec_id() no reaction selected: ', reaction_id 
+      END IF
+
+            
+      !PRINT*,'xsec_bh, reaction_id: ', reaction_id, ' BG, A1: ' , BG, A1
+      
+      IF ( e > 0.01 ) THEN ! threshold dE > 10 eV
+         se_top = A1 + e*(A2 + e*(A3 + e*(A4 + e*A5))) 
+         se_down = 1. + e*(B1 + e*(B2 + e*(B3 + e*B4)))            
+         se = se_top / se_down
+         xsec_bh = (se / (e * exp( BG / SQRT(e) ) ) )*1e-31 ! m^2
+      ELSE
+         xsec_bh = 0.0_num
+      END IF
+
+    END FUNCTION xsec_bh
+
+
+   FUNCTION xsec_fo(reaction_id, e)
+      ! Bosh-Hale fusion cross section
+     IMPLICIT NONE
+     
+      REAL(num) :: xsec_fo
+      INTEGER ,  INTENT(IN) :: reaction_id 
+      REAL(num), INTENT(IN) :: e ! keV
+      REAL(num)             :: A1, A2, A3, A4, A5  
+      REAL(num)             :: se, se_top, se_down
+
+      ! Plasma Formulary parametrisation
+      ! xsection are given in barn
+
+      IF ( reaction_id == 3) THEN
+         A1 =  45.95
+         A2 =  50200.0_num
+         A3 =  1.368e-2
+         A4 =  1.076
+         A5 =  409.0_num
+      ELSE  IF (reaction_id == 4) THEN
+         A1 =  89.27
+         A2 =  25900.0_num
+         A3 =  3.98e-3
+         A4 =  1.297
+         A5 =  647.0_num
+      ELSE IF ( reaction_id == 5) THEN
+         A1 =  123.1 
+         A2 =  11250.0_num
+         A3 =  0
+         A4 =  0
+         A5 =  0
+      ELSE IF ( reaction_id == 6) THEN   
+         A1 =  123.1 
+         A2 =  11250.0_num
+         A3 =  0
+         A4 =  0
+         A5 =  0
+      ELSE
+         PRINT*,' Warning xsec_id() no reaction selected: ', reaction_id 
+      END IF
+
+      IF ( e > 0.01) THEN 
+         se_top = A5 + A2 * ( 1.0_num / ( (A4 - A3 * e)**2) )   
+         se_down = e * ( EXP (A1 * 1.0_num/SQRT(e) ) - 1.0_num )            
+         se = se_top / se_down
+         xsec_fo = (se )*1e-28 ! m^2
+      ELSE
+         xsec_fo = 0.0_num
+      END IF
+
+    END FUNCTION xsec_fo
+
+    
     FUNCTION xsec(e)
       ! Bosh-Hale fusion cross section
       IMPLICIT NONE
@@ -396,8 +1007,8 @@ module collision_nuclear
     SUBROUTINE model_dd_fusion2(p_list, mass, charge, weight, &
          dens, log_lambda, user_factor)
       ! Perform collisions between particles of the same species.
-      TYPE(particle_list), INTENT(IN) :: p_list
-      REAL(num), INTENT(IN) :: mass, charge, weight
+      TYPE(particle_list), INTENT(IN) :: p_list(2)
+      REAL(num), INTENT(IN) :: mass(2), charge(2), weight(2)
       REAL(num), INTENT(IN) :: user_factor
       REAL(num), INTENT(IN) :: dens, log_lambda
       TYPE(particle), POINTER :: current, impact
@@ -420,7 +1031,7 @@ module collision_nuclear
       factor = 0.0_num
       
       ! Intra-species collisions
-      icount = p_list%count
+      icount = p_list(1)%count
       
       ! If there aren't enough particles to collide, then don't bother
       IF (icount <= 1) RETURN
@@ -434,9 +1045,9 @@ module collision_nuclear
       factor = user_factor / (pcount * weight * 2.0_num)
 #else
       ! temporarily join tail to the head of the list to make it circular
-      p_list%tail%next => p_list%head
+      p_list(1)%tail%next => p_list(1)%head
       
-      current => p_list%head
+      current => p_list(1)%head
       impact => current%next
       DO k = 1, pcount
          factor = factor + MIN(current%weight, impact%weight)
@@ -450,12 +1061,12 @@ module collision_nuclear
       factor = user_factor / factor / 2.0_num
 #endif
       ! If possible, use per-species properties
-      m1 = mass
-      m2 = mass
-      q1 = charge
-      q2 = charge
+      m1 = mass(1)
+      m2 = mass(2)
+      q1 = charge(1)
+      q2 = charge(2)
       
-      current => p_list%head
+      current => p_list(1)%head
       impact => current%next
       
       ! Per-cell constant factors
@@ -621,7 +1232,7 @@ module collision_nuclear
    END DO ! do k, pcount
    
     ! restore the tail of the list
-    NULLIFY(p_list%tail%next)
+    NULLIFY(p_list(1)%tail%next)
 
   END SUBROUTINE model_dd_fusion2
 

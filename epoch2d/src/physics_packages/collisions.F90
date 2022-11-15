@@ -96,6 +96,7 @@ CONTAINS
     TYPE(particle_list), POINTER :: p_list1
     TYPE(particle_list) :: list_e_ionising, list_i_ionised, list_e_ejected
     TYPE(particle_list) :: he_product_list, n_product_list
+    TYPE(particle_list), DIMENSION(6,2) :: product_lists
     REAL(num), DIMENSION(:,:), ALLOCATABLE :: idens, jdens
     REAL(num), DIMENSION(:,:), ALLOCATABLE :: jtemp, log_lambda
     REAL(num), DIMENSION(:,:), ALLOCATABLE :: iekbar
@@ -105,7 +106,10 @@ CONTAINS
     REAL(num) :: w_electron, w_ion, w_ejected, mass_ion, charge_ion
     REAL(num) :: ee_cou_log, ei_cou_log
     LOGICAL :: collide_species, i_is_ion, i_is_electron, run_coll_ionisation
-    INTEGER :: n_species_id, he_species_id
+    INTEGER :: n_species_id, he_species_id, he4_species_id, p_species_id, t_species_id
+    INTEGER :: d_species_id, he5_species_id
+    INTEGER :: i, j, reaction_id
+    INTEGER, DIMENSION(6,2) :: product_species_id
     
     ALLOCATE(idens(1-ng:nx+ng,1-ng:ny+ng))
     ALLOCATE(jdens(1-ng:nx+ng,1-ng:ny+ng))
@@ -127,6 +131,13 @@ CONTAINS
     IF (do_nuclear_reactions) THEN
       CALL create_empty_partlist(n_product_list)
       CALL create_empty_partlist(he_product_list)
+
+      DO i = 1 , 6
+         DO j = 1, 2
+            CALL create_empty_partlist(product_lists(i,j))
+         END DO
+      END DO
+
     END IF
 
 
@@ -134,6 +145,25 @@ CONTAINS
      CALL nuclear_reactions%initialize() 
      CALL nuclear_reactions%get_species_id('neutron', n_species_id)
      CALL nuclear_reactions%get_species_id('helium',  he_species_id)
+     CALL nuclear_reactions%get_species_id('helium4', he4_species_id)
+     CALL nuclear_reactions%get_species_id('helium5', he5_species_id)     
+     CALL nuclear_reactions%get_species_id('proton',  p_species_id)
+     CALL nuclear_reactions%get_species_id('tritium', t_species_id)
+     CALL nuclear_reactions%get_species_id('deuteron', d_species_id)     
+
+     product_species_id(1,1) = t_species_id
+     product_species_id(1,2) = p_species_id
+     product_species_id(2,1) = he_species_id
+     product_species_id(2,2) = n_species_id
+     product_species_id(3,1) = he4_species_id
+     product_species_id(3,2) = n_species_id          
+     product_species_id(4,1) = he4_species_id
+     product_species_id(4,2) = p_species_id
+     product_species_id(5,1) = he4_species_id
+     product_species_id(5,2) = d_species_id                    
+     product_species_id(6,1) = he5_species_id
+     product_species_id(6,2) = p_species_id                    
+     
      !PRINT*,'collisions: neutron_id: ', n_species_id, 'helium_id: ', he_species_id
      
     DO ispecies = 1, n_species
@@ -192,12 +222,14 @@ CONTAINS
              CALL shuffle_particle_list_random(p_list1)
           END DO ! ix
        END DO ! iy
-       
+
+       ! DB initialise coll_ionise flag beforehand    
+       run_coll_ionisation = .FALSE.
        DO jspecies = ispecies, n_species
           ! Currently no support for photon collisions so just cycle round
           IF (species_list(jspecies)%species_type == c_species_id_photon) &
                CYCLE
-          
+
           ! Check if ispecies and jspecies can trigger ionisation events
           IF (use_collisional_ionisation) THEN
              run_coll_ionisation = .FALSE.
@@ -249,41 +281,63 @@ CONTAINS
                    IF (do_nuclear_reactions) THEN
                       ! Apply nuclear reaction in the like-particle case
                       ! Test particle list
-                      nuclear_reactions%p_list = species_list(ispecies)%secondary_list(ix,iy)
-                      nuclear_reactions%mass   = m1
-                      nuclear_reactions%charge = q1
-                      nuclear_reactions%weight = w1
+                      nuclear_reactions%ispecies = ispecies
+                      nuclear_reactions%jspecies = jspecies                      
+                      nuclear_reactions%p_list(1) = species_list(ispecies)%secondary_list(ix,iy)
+                      nuclear_reactions%mass(1)   = m1
+                      nuclear_reactions%charge(1) = q1
+                      nuclear_reactions%weight(1) = w1
+                      nuclear_reactions%mass(2)   = m2
+                      nuclear_reactions%charge(2) = q2
+                      nuclear_reactions%weight(2) = w2
+                      
                       nuclear_reactions%dens   = idens(ix,iy)
                       nuclear_reactions%log_lambda = log_lambda(ix,iy)
                       nuclear_reactions%user_factor = user_factor              
 
-                      CALL nuclear_reactions%do_collide(n_product_list, he_product_list)
+                      !CALL nuclear_reactions%do_collide(n_product_list, he_product_list)
+                      CALL nuclear_reactions%do_like_collide(reaction_id, product_lists)
+                        
+                     ! PRINT*, ' after do_like_collision:  reaction_id: ', reaction_id, &
+                     !         ' list p1: ', product_lists(reaction_id, 1)%count, &
+                     !         ' list p2: ', product_lists(reaction_id, 2)%count                       
 
                       ! Put reactions products into respective lists
                       ! here particles will be added to (ix, iy) bin
                       ! and no compton scattering effects will be performed
                       ! at this timestep
 
-                      CALL append_partlist( &
-                           species_list(n_species_id)%secondary_list(ix,iy), &
-                           n_product_list)
-                      CALL append_partlist( &
-                           species_list(he_species_id)%secondary_list(ix,iy), &
-                           he_product_list)
 
-                      PRINT*,'n_collisions@time: ', time,' i_species: ', ispecies,' count: ' &
-                           , nuclear_reactions%p_list%count,' neutrons#: ' &
-                           , species_list(n_species_id)%secondary_list(ix,iy)%count &
-                           , ' helium#: ', species_list(he_species_id)%secondary_list(ix,iy)%count 
+                      DO i = 1 , 6
+                         DO j = 1, 2
+                            IF (product_lists(i,j)%count > 0 ) THEN
+                               CALL append_partlist( &
+                                    species_list(product_species_id(i,j))%secondary_list(ix,iy), &
+                                    product_lists(i,j))
+                               END IF
+                            
+                         END DO
+                      END DO
+
+                      !PRINT*, 'n_collisions@time: ', time,' i_species: ', ispecies,' part_count_in_cell: ' &
+                      !     , nuclear_reactions%p_list(1)%count
+
+                      !DO i = 1 , 6
+                      !   IF (product_lists(i,j)%count > 0 ) THEN
+                      !      PRINT*,'  reaction_id: ', i  &
+                      !           , ' prod_p1: ', species_list(product_species_id(i,1))%secondary_list(ix,iy)%count &
+                      !           , ' prod_p2: ', species_list(product_species_id(i,2))%secondary_list(ix,iy)%count 
+                      !   END IF
+                      !END DO
                                               
                       ! Perform at end scattering on id:ispecies relevant list
                       ! Here i disable any further scattering treatment
                       ! to reproduce  Higginsons benchmarks
                       
-                      !CALL intra_coll_fn( &
-                      !     species_list(ispecies)%secondary_list(ix,iy), &
-                      !     m1, q1, w1, idens(ix,iy), &
-                      !     log_lambda(ix,iy), user_factor)                      
+                       CALL intra_coll_fn( &
+                           species_list(ispecies)%secondary_list(ix,iy), &
+                           m1, q1, w1, idens(ix,iy), &
+                           log_lambda(ix,iy), user_factor)                      
                    ELSE   
                       CALL intra_coll_fn( &
                            species_list(ispecies)%secondary_list(ix,iy), &
@@ -368,11 +422,48 @@ CONTAINS
                         species_list(ejected_species)%secondary_list(ix,iy), &
                         list_e_ejected)
                 ELSE
-                   CALL inter_coll_fn( &
-                        species_list(ispecies)%secondary_list(ix,iy), &
-                        species_list(jspecies)%secondary_list(ix,iy), &
-                        m1, m2, q1, q2, w1, w2, idens(ix,iy), jdens(ix,iy), &
-                        log_lambda(ix,iy), user_factor)
+                      ! Apply nuclear reaction in the like-particle case
+                      ! Test particle list
+                      nuclear_reactions%ispecies = ispecies
+                      nuclear_reactions%jspecies = jspecies                      
+                      nuclear_reactions%p_list(1) = species_list(ispecies)%secondary_list(ix,iy)
+                      nuclear_reactions%mass(1)   = m1
+                      nuclear_reactions%charge(1) = q1
+                      nuclear_reactions%weight(1) = w1
+                      nuclear_reactions%p_list(2) = species_list(jspecies)%secondary_list(ix,iy)
+                      nuclear_reactions%mass(2)   = m2
+                      nuclear_reactions%charge(2) = q2
+                      nuclear_reactions%weight(2) = w2
+                      
+                      nuclear_reactions%dens(1)   = idens(ix,iy)
+                      nuclear_reactions%dens(1)   = jdens(ix,iy)                      
+                      nuclear_reactions%log_lambda = log_lambda(ix,iy)
+                      nuclear_reactions%user_factor = user_factor              
+
+                      CALL nuclear_reactions%do_unlike_collide(reaction_id, product_lists)  
+
+                      !PRINT*, ' after do_unlike_collision:  reaction_id: ', reaction_id, &
+                      !        ' list p1: ', product_lists(reaction_id, 1)%count, &
+                      !        ' list p2: ', product_lists(reaction_id, 2)%count                       
+
+                      ! Append list to the main particle list
+                      DO i = 1 , 6
+                         DO j = 1, 2
+                            IF (product_lists(i,j)%count > 0 ) THEN
+                               CALL append_partlist( &
+                                    species_list(product_species_id(i,j))%secondary_list(ix,iy), &
+                                    product_lists(i,j))
+                            END IF
+                            
+                         END DO
+                      END DO
+                      
+                  ! DB disable for the moment 
+                      CALL inter_coll_fn( &
+                         species_list(ispecies)%secondary_list(ix,iy), &
+                         species_list(jspecies)%secondary_list(ix,iy), &
+                         m1, m2, q1, q2, w1, w2, idens(ix,iy), jdens(ix,iy), &
+                         log_lambda(ix,iy), user_factor)
                 END IF !(ispecies == jspecies )
              END DO ! ix
           END DO ! iy
